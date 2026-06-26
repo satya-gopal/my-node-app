@@ -175,3 +175,50 @@ jobs:
 
             sleep 10
           done
+
+  notify:
+    name: Send Notification
+    runs-on: ubuntu-latest
+    needs: [test, build-and-push, deploy]
+    if: always()
+    steps:
+      - name: Determine status
+        id: status
+        run: |
+          if [ "${{ needs.deploy.result }}" == "success" ] && [ "${{ needs.test.result }}" == "success" ]; then
+            echo "status=✅ Deployment Successful" >> $GITHUB_OUTPUT
+            echo "color=good" >> $GITHUB_OUTPUT
+          else
+            echo "status=❌ Deployment Failed" >> $GITHUB_OUTPUT
+            echo "color=danger" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Configure AWS credentials
+        if: false # Disable for now - SNS will be set up later
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/GitHubActionsECSRole
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Send SNS notification
+        if: false # Disable for now - SNS will be set up later
+        env:
+          TOPIC_ARN: arn:aws:sns:ap-south-2:${{ secrets.AWS_ACCOUNT_ID }}:deployment-notifications
+          MESSAGE: |
+            🚀 Deployment Status: ${{ steps.status.outputs.status }}
+
+            Repository: ${{ github.repository }}
+            Commit: ${{ github.sha }}
+            Branch: ${{ github.ref_name }}
+            Actor: ${{ github.actor }}
+
+            Test Status: ${{ needs.test.result }}
+            Build Status: ${{ needs.build-and-push.result }}
+            Deployment Status: ${{ needs.deploy.result }}
+
+            View deployment at: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          aws sns publish \
+            --topic-arn $TOPIC_ARN \
+            --message "$MESSAGE" \
+            --region $AWS_REGION

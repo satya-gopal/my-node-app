@@ -8,6 +8,8 @@ RUN npm ci --omit=dev
 
 COPY . .
 
+RUN apk add --no-cache curl
+
 RUN addgroup -S nodejs && \
     adduser -S nodejs -G nodejs && \
     chown -R nodejs:nodejs /app
