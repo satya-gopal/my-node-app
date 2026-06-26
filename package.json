@@ -3,10 +3,10 @@
   "version": "1.0.0",
   "main": "app.js",
   "scripts": {
-    "test": "jest",
-    "start": "node app.js",
-    "test:coverage": "jest --coverage"
-  },
+  "start": "node app.js",
+  "test": "jest --runInBand",
+  "test:coverage": "jest --coverage --runInBand"
+},
   "keywords": [],
   "author": "",
   "license": "ISC",
