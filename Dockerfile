@@ -21,4 +21,4 @@ EXPOSE 3000
 ENV NODE_ENV=production
 ENV APP_VERSION=1.0.0
 
-CMD ["node", "app.js"]
+CMD ["node", "app.js"] 
