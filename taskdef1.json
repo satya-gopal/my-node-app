@@ -1,0 +1,50 @@
+{
+    "taskDefinitionArn": "arn:aws:ecs:ap-south-2:684897144122:task-definition/my-node-app-task:1",
+    "containerDefinitions": [
+      {
+        "name": "my-node-app",
+        "image": "684897144122.dkr.ecr.ap-south-2.amazonaws.com/my-node-app:latest",
+        "cpu": 0,
+        "portMappings": [
+          {
+            "containerPort": 3000,
+            "hostPort": 3000,
+            "protocol": "tcp"
+          }
+        ],
+        "essential": true,
+        "environment": [
+          {
+            "name": "NODE_ENV",
+            "value": "production"
+          },
+          {
+            "name": "APP_VERSION",
+            "value": "1.0.0"
+          }
+        ],
+        "healthCheck": {
+          "command": [
+            "CMD-SHELL",
+            "curl -f http://localhost:3000/health || exit 1"
+          ],
+          "interval": 30,
+          "timeout": 5,
+          "retries": 3,
+          "startPeriod": 10
+        }
+      }
+    ],
+    "family": "my-node-app-task",
+    "taskRoleArn": "arn:aws:iam::684897144122:role/ecsTaskExecutionRole",
+    "executionRoleArn": "arn:aws:iam::684897144122:role/ecsTaskExecutionRole",
+    "networkMode": "awsvpc",
+    "requiresCompatibilities": ["FARGATE"],
+    "cpu": "256",
+    "memory": "512",
+    "runtimePlatform": {
+      "operatingSystemFamily": "LINUX",
+      "cpuArchitecture": "X86_64"
+    }
+  }
+  
