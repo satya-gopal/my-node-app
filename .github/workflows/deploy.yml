@@ -25,23 +25,16 @@ jobs:
     name: Run Tests
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
+      - uses: actions/checkout@v3
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v3
+      - uses: actions/setup-node@v3
         with:
           node-version: "18"
           cache: "npm"
 
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Run tests
-        run: npm test
-
-      - name: Run tests with coverage
-        run: npm run test:coverage
+      - run: npm ci
+      - run: npm test
+      - run: npm run test:coverage
 
   build-and-push:
     name: Build and Push Docker Image
@@ -49,56 +42,50 @@ jobs:
     needs: test
     outputs:
       image-tag: ${{ steps.build.outputs.image-tag }}
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
 
-      - name: Configure AWS credentials via OIDC
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v2
         with:
           role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/GitHubActionsECSRole
           aws-region: ${{ env.AWS_REGION }}
-          role-session-name: GitHubActionsSession
 
-      - name: Login to Amazon ECR
+      - name: Login to ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v1
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v2
-
-      - name: Build, tag, and push image to Amazon ECR
+      - name: Build & Push
         id: build
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           IMAGE_TAG: ${{ github.sha }}
         run: |
-          docker buildx build \
-            --platform linux/amd64 \
-            --build-arg APP_VERSION=${{ github.sha }} \
+          docker build \
             -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG \
-            -t $ECR_REGISTRY/$ECR_REPOSITORY:latest \
-            --push .
+            -t $ECR_REGISTRY/$ECR_REPOSITORY:latest .
+
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
 
           echo "image-tag=$IMAGE_TAG" >> $GITHUB_OUTPUT
-          echo "Image pushed successfully: $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
 
   deploy:
     name: Deploy to ECS (Blue/Green)
     runs-on: ubuntu-latest
     needs: build-and-push
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
 
-      - name: Configure AWS credentials via OIDC
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v2
         with:
           role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/GitHubActionsECSRole
           aws-region: ${{ env.AWS_REGION }}
-          role-session-name: GitHubActionsSession
 
-      - name: Login to Amazon ECR
+      - name: Login to ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v1
 
@@ -108,15 +95,13 @@ jobs:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           IMAGE_TAG: ${{ needs.build-and-push.outputs.image-tag }}
         run: |
-          # Download current task definition
           aws ecs describe-task-definition \
             --task-definition $ECS_TASK_DEFINITION \
             --region $AWS_REGION \
             --query taskDefinition > task-definition.json
 
-          # Update image and remove read-only fields
           jq --arg IMAGE "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" '
-            .containerDefinitions[0].image = $IMAGE
+            (.containerDefinitions[] | select(.name=="my-node-app").image) = $IMAGE
             | del(
                 .taskDefinitionArn,
                 .revision,
@@ -124,15 +109,10 @@ jobs:
                 .requiresAttributes,
                 .compatibilities,
                 .registeredAt,
-                .registeredBy,
-                .deregisteredAt
+                .registeredBy
               )
           ' task-definition.json > task-definition-updated.json
 
-          echo "===== Task Definition to Register ====="
-          cat task-definition-updated.json
-
-          # Register new task definition
           NEW_TASK_DEF_ARN=$(aws ecs register-task-definition \
             --cli-input-json file://task-definition-updated.json \
             --region $AWS_REGION \
@@ -140,115 +120,58 @@ jobs:
             --output text)
 
           echo "NEW_TASK_DEF_ARN=$NEW_TASK_DEF_ARN" >> $GITHUB_ENV
-          echo "Registered new task definition: $NEW_TASK_DEF_ARN"
 
-      - name: Create CodeDeploy deployment
+      - name: Generate AppSpec (FIXED)
+        run: |
+          cat > appspec.yaml <<EOF
+          version: 0.0
+          Resources:
+            - TargetService:
+                Type: AWS::ECS::Service
+                Properties:
+                  TaskDefinition: "$NEW_TASK_DEF_ARN"
+                  LoadBalancerInfo:
+                    ContainerName: "my-node-app"
+                    ContainerPort: 3000
+          EOF
+
+      - name: Create deployment
         id: deploy
         env:
           APPLICATION_NAME: my-node-app-deploy
           DEPLOYMENT_GROUP_NAME: my-node-app-deployment-group
         run: |
-          # Check if deployment group exists
-          if ! aws deploy get-deployment-group \
-            --application-name $APPLICATION_NAME \
-            --deployment-group-name $DEPLOYMENT_GROUP_NAME \
-            --region $AWS_REGION 2>/dev/null; then
-            
-            echo "Creating deployment group..."
-            # Need to create deployment group with proper configuration
-            # This should be done once - see Step 17
-          fi
-
-          # Create deployment
           DEPLOYMENT_ID=$(aws deploy create-deployment \
             --application-name $APPLICATION_NAME \
             --deployment-group-name $DEPLOYMENT_GROUP_NAME \
-            --revision "revisionType=AppSpecContent,appSpecContent={content='$(cat appspec.yaml | base64 -w 0)'}" \
+            --revision "revisionType=AppSpecContent,appSpecContent={content='$(cat appspec.yaml | sed "s/'/\\'/g")'}" \
             --region $AWS_REGION \
             --query 'deploymentId' \
             --output text)
 
           echo "DEPLOYMENT_ID=$DEPLOYMENT_ID" >> $GITHUB_ENV
-          echo "Deployment created: $DEPLOYMENT_ID"
 
-      - name: Wait for deployment to complete
-        env:
-          DEPLOYMENT_ID: ${{ env.DEPLOYMENT_ID }}
+      - name: Wait for deployment
         run: |
-          echo "Waiting for deployment to complete..."
+          echo "Waiting..."
+
           while true; do
             STATUS=$(aws deploy get-deployment \
               --deployment-id $DEPLOYMENT_ID \
               --region $AWS_REGION \
               --query 'deploymentInfo.status' \
               --output text)
-            
-            echo "Deployment status: $STATUS"
-            
+
+            echo "Status: $STATUS"
+
             if [ "$STATUS" == "Succeeded" ]; then
-              echo "✅ Deployment succeeded!"
+              echo "✅ Success"
               break
             elif [ "$STATUS" == "Failed" ] || [ "$STATUS" == "Stopped" ]; then
-              echo "❌ Deployment failed with status: $STATUS"
+              echo "❌ Failed"
+              aws deploy get-deployment --deployment-id $DEPLOYMENT_ID --region $AWS_REGION
               exit 1
             fi
-            
+
             sleep 10
           done
-
-      - name: Get deployment details
-        if: always()
-        env:
-          DEPLOYMENT_ID: ${{ env.DEPLOYMENT_ID }}
-        run: |
-          echo "=== Deployment Details ==="
-          aws deploy get-deployment \
-            --deployment-id $DEPLOYMENT_ID \
-            --region $AWS_REGION
-
-  notify:
-    name: Send Notification
-    runs-on: ubuntu-latest
-    needs: [test, build-and-push, deploy]
-    if: always()
-    steps:
-      - name: Determine status
-        id: status
-        run: |
-          if [ "${{ needs.deploy.result }}" == "success" ] && [ "${{ needs.test.result }}" == "success" ]; then
-            echo "status=✅ Deployment Successful" >> $GITHUB_OUTPUT
-            echo "color=good" >> $GITHUB_OUTPUT
-          else
-            echo "status=❌ Deployment Failed" >> $GITHUB_OUTPUT
-            echo "color=danger" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Configure AWS credentials
-        if: false # Disable for now - SNS will be set up later
-        uses: aws-actions/configure-aws-credentials@v2
-        with:
-          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/GitHubActionsECSRole
-          aws-region: ${{ env.AWS_REGION }}
-
-      - name: Send SNS notification
-        if: false # Disable for now - SNS will be set up later
-        env:
-          TOPIC_ARN: arn:aws:sns:ap-south-2:${{ secrets.AWS_ACCOUNT_ID }}:deployment-notifications
-          MESSAGE: |
-            🚀 Deployment Status: ${{ steps.status.outputs.status }}
-
-            Repository: ${{ github.repository }}
-            Commit: ${{ github.sha }}
-            Branch: ${{ github.ref_name }}
-            Actor: ${{ github.actor }}
-
-            Test Status: ${{ needs.test.result }}
-            Build Status: ${{ needs.build-and-push.result }}
-            Deployment Status: ${{ needs.deploy.result }}
-
-            View deployment at: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: |
-          aws sns publish \
-            --topic-arn $TOPIC_ARN \
-            --message "$MESSAGE" \
-            --region $AWS_REGION
